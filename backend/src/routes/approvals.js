@@ -1,69 +1,77 @@
 // backend/src/routes/approvals.js
 import express from 'express';
-import axios from 'axios';
 import { supabase } from '../supabaseClient.js';
+import axios from 'axios';
 
 export const approvalsRouter = express.Router();
 
-// ────────────────────────────────────────────────────────────
+async function notifyOrchestrator(run_id, node_id, decision) {
+  try {
+    const baseUrl = process.env.ORCHESTRATOR_URL || 'http://localhost:8000';
+    await axios.post(`${baseUrl}/approval-callback`, {
+      run_id,
+      node_id,
+      decision,
+    });
+  } catch (err) {
+    console.error('[WARN] Could not notify orchestrator:', err.message);
+  }
+}
+
 // GET /api/approvals/pending
-// Returns all pending approval gates across all runs
-// ────────────────────────────────────────────────────────────
+// No joins — simple select on approvals table only
 approvalsRouter.get('/pending', async (_req, res) => {
   try {
     const { data, error } = await supabase
       .from('approvals')
-      .select('*, workflow_runs(workflow_id), workflow_run_steps(name)')
+      .select('*')          // ← no join, no FK needed
       .eq('status', 'pending')
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: false });
 
-    if (error) throw new Error(error.message);
-    return res.json(data);
+    if (error) throw error;
+    return res.json(data || []);
   } catch (err) {
+    console.error('[ERROR] GET /approvals/pending:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ────────────────────────────────────────────────────────────
 // POST /api/approvals/:id/decision
-// Body: { decision: 'approved'|'rejected', approved_by, comments }
-// Updates the approval and notifies the Orchestrator to resume/abort
-// ────────────────────────────────────────────────────────────
+// Body: { decision: 'approved' | 'rejected', comments }
 approvalsRouter.post('/:id/decision', async (req, res) => {
   try {
-    const approvalId = req.params.id;
-    const { decision, approved_by, comments } = req.body;
+    const id = req.params.id;
+    const { decision, comments } = req.body;
 
-    if (!['approved', 'rejected'].includes(decision)) {
-      return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
-    }
+    // Fetch approval row first
+    const { data: approval, error: fetchErr } = await supabase
+      .from('approvals')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-    // Update approval row
-    const { data: approval, error: approvalErr } = await supabase
+    if (fetchErr) throw fetchErr;
+
+    // Update approval status
+    const { data: updated, error: updateErr } = await supabase
       .from('approvals')
       .update({
-        status: decision,
-        approved_by: decision === 'approved' ? approved_by : null,
-        comments,
-        decided_at: new Date().toISOString(),
+        status:     decision === 'approved' ? 'approved' : 'rejected',
+        comments:   comments || '',
+        updated_at: new Date().toISOString(),
       })
-      .eq('id', approvalId)
+      .eq('id', id)
       .select()
       .single();
 
-    if (approvalErr) throw new Error(approvalErr.message);
+    if (updateErr) throw updateErr;
 
-    // Notify Python Orchestrator to resume or abort the run
-    const baseUrl = process.env.ORCHESTRATOR_URL || 'http://localhost:8000';
-    await axios.post(`${baseUrl}/approval-callback`, {
-      run_id: approval.run_id,
-      node_id: approval.node_id,
-      decision,
-    });
+    // Notify Python orchestrator
+    await notifyOrchestrator(approval.run_id, approval.node_id, decision);
 
-    return res.json(approval);
+    return res.json(updated);
   } catch (err) {
-    console.error('[POST /approvals/:id/decision]', err.message);
+    console.error('[ERROR] POST /approvals/:id/decision:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
