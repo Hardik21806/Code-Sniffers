@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment variables (SECRETS)
+.env
+.env.local
+# Logs
+logs
+*.log
+
+# OS files
+.DS_Store
+
+# Build files
+dist/
+build/
+
+# JSON secrets (be careful)
+*.json
