@@ -6,284 +6,270 @@
 //   4. User can optionally edit node positions, then click Execute.
 //   5. POST /api/workflows/:id/execute → starts a run; redirects to RunDashboard.
 
-import React, { useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState } from 'react';
 import axios from 'axios';
 
-import {
-  ReactFlow,
-  MiniMap,
-  Controls,
-  Background,
-  addEdge,
-  useNodesState,
-  useEdgesState,
-  MarkerType,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
-
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:4000';
+const ORCH_BASE = import.meta.env.VITE_ORCH_BASE || 'http://localhost:8000';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Convert a flat DAG node list from the Planner API into ReactFlow nodes + edges.
- * Positions are auto-distributed in a vertical cascade.
- */
-function dagToFlow(dagNodes) {
-  const rfNodes = dagNodes.map((n, i) => ({
-    id:       n.id,
-    type:     'default',
-    position: { x: (i % 3) * 280, y: Math.floor(i / 3) * 160 },
-    data: {
-      label: (
-        <div>
-          <strong style={{ fontSize: 13 }}>{n.id}</strong>
-          <br />
-          <span style={{ fontSize: 11, color: '#7a7974' }}>
-            {n.mcp_server} → {n.tool}
-          </span>
-          {n.approval_required && (
-            <span style={{
-              display: 'inline-block', marginTop: 4,
-              background: '#fbecb4', color: '#8a5b00',
-              borderRadius: 4, padding: '1px 6px', fontSize: 10,
-            }}>
-              🔐 Needs Approval
-            </span>
-          )}
-        </div>
-      ),
-    },
-    style: {
-      background: n.approval_required ? '#fff8e1' : '#fff',
-      border: `1px solid ${n.approval_required ? '#d19900' : '#dcd9d5'}`,
-      borderRadius: 8,
-      padding: 10,
-      minWidth: 200,
-      boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-    },
-  }));
-
-  const rfEdges = [];
-  dagNodes.forEach(n => {
-    (n.depends_on || []).forEach(dep => {
-      rfEdges.push({
-        id:           `${dep}->${n.id}`,
-        source:       dep,
-        target:       n.id,
-        markerEnd:    { type: MarkerType.ArrowClosed },
-        style:        { stroke: '#01696f', strokeWidth: 2 },
-        animated:     true,
-      });
-    });
-  });
-
-  return { rfNodes, rfEdges };
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function WorkflowBuilder() {
-  const navigate = useNavigate();
-
-  const [name,        setName]        = useState('');
+const WorkflowBuilder = () => {
+  const [name, setName]               = useState('');
   const [description, setDescription] = useState('');
-  const [ownerId]                     = useState('demo-user');
-  const [workflowId,  setWorkflowId]  = useState(null);
+  const [dag, setDag]                 = useState(null);
   const [suggestions, setSuggestions] = useState([]);
-  const [loading,     setLoading]     = useState(false);
-  const [error,       setError]       = useState('');
-  const [mode,        setMode]        = useState('live'); // 'live' | 'dry-run'
+  const [workflowId, setWorkflowId]   = useState(null);
+  const [runId, setRunId]             = useState(null);
+  const [loading, setLoading]         = useState(false);
+  const [error, setError]             = useState(null);
 
-  const [rfNodes, setRfNodes, onNodesChange] = useNodesState([]);
-  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState([]);
-  const onConnect = useCallback(
-    params => setRfEdges(eds => addEdge({ ...params, animated: true }, eds)),
-    [setRfEdges]
-  );
-
-  // ── 1. Plan: NL description → DAG ─────────────────────────────────────────
+  // ── Step 1: Plan workflow via Python orchestrator directly ──────────
   const handlePlan = async () => {
-    if (!name.trim() || !description.trim()) {
-      setError('Please enter both a workflow name and description.');
+    if (!name || !description) {
+      setError('Please fill in both Workflow Name and Description.');
       return;
     }
-    setError('');
+    setError(null);
     setLoading(true);
+    setDag(null);
+    setSuggestions([]);
+    setWorkflowId(null);
+    setRunId(null);
+
     try {
-      const { data } = await axios.post(`${API_BASE}/api/workflows/plan`, {
+      // Call orchestrator /plan directly
+      const { data } = await axios.post(`${ORCH_BASE}/plan`, {
         name,
         description,
-        owner_id: ownerId,
+        owner_id: 'demo-user',
       });
 
-      // data.workflow is the saved row; data.dag is the node list
-      setWorkflowId(data.workflow.id);
+      setDag(data.dag || []);
       setSuggestions(data.suggestions || []);
 
-      const { rfNodes: nodes, rfEdges: edges } = dagToFlow(data.dag);
-      setRfNodes(nodes);
-      setRfEdges(edges);
+      // Also save to Node backend → Supabase
+      try {
+        const saveResp = await axios.post(`${API_BASE}/api/workflows/plan`, {
+          name,
+          description,
+          owner_id: 'demo-user',
+        });
+        // saveResp.data.workflow.id is the saved workflow UUID
+        if (saveResp.data?.workflow?.id) {
+          setWorkflowId(saveResp.data.workflow.id);
+        }
+      } catch (saveErr) {
+        console.warn('Could not save to Node backend:', saveErr.message);
+        // Non-fatal — DAG still shown even if save fails
+      }
     } catch (err) {
-      setError(err.response?.data?.error || err.message);
+      setError(`Planning failed: ${err.response?.data?.detail || err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // ── 2. Execute: start a run and navigate to the live dashboard ────────────
+  // ── Step 2: Execute workflow ────────────────────────────────────────
   const handleExecute = async () => {
-    if (!workflowId) {
-      setError('Please plan a workflow first.');
-      return;
-    }
-    setError('');
+    if (!dag || dag.length === 0) return;
+    setError(null);
     setLoading(true);
+
     try {
-      const { data } = await axios.post(
-        `${API_BASE}/api/workflows/${workflowId}/execute`,
-        { input_context: {}, mode }
-      );
-      navigate(`/runs/${data.run.id}`);
+      const newRunId = `run-${Date.now()}`;
+
+      // Always call orchestrator /execute directly with full DAG
+      const { data } = await axios.post(`${ORCH_BASE}/execute`, {
+        run_id:       newRunId,
+        workflow_id:  workflowId || 'demo-workflow',
+        mode:         'dry-run',
+        dry_run:      true,
+        dag:          dag,
+        input_payload: {},
+      });
+
+      setRunId(newRunId);
+      alert(`✅ Run started! Run ID: ${newRunId}\n\nGo to the Approvals tab to approve pending steps.\nCheck terminal for live logs.`);
     } catch (err) {
-      setError(err.response?.data?.error || err.message);
+      setError(`Execution failed: ${err.response?.data?.detail || err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Node type → color badge ─────────────────────────────────────────
+  const typeBadgeColor = (type) => {
+    const colors = {
+      trigger:      '#3b82f6',
+      action:       '#8b5cf6',
+      notify:       '#f59e0b',
+      utility:      '#10b981',
+      approval_gate:'#ef4444',
+    };
+    return colors[type] || '#6b7280';
+  };
+
   return (
-    <div>
-      <h1 style={s.h1}>Workflow Builder</h1>
-      <p style={s.subtitle}>
+    <div style={{ maxWidth: 800, margin: '0 auto', padding: 24 }}>
+      <h1>⚡ Workflow Builder</h1>
+      <p style={{ color: '#6b7280' }}>
         Describe your workflow in plain English — the AI Planner will build the execution DAG.
       </p>
 
-      {/* ── Input panel ── */}
-      <div style={s.card}>
-        <div style={s.row}>
-          <div style={{ flex: 1 }}>
-            <label style={s.label}>Workflow Name</label>
-            <input
-              style={s.input}
-              placeholder="e.g. Critical Bug Triage"
-              value={name}
-              onChange={e => setName(e.target.value)}
-            />
-          </div>
-          <div style={{ flex: 2 }}>
-            <label style={s.label}>Natural Language Description</label>
-            <textarea
-              style={{ ...s.input, minHeight: 72, resize: 'vertical' }}
-              placeholder={
-                'e.g. When a critical bug is filed in Jira, create a GitHub branch, ' +
-                'notify on-call in Slack, and update the incident tracker sheet.'
-              }
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-            />
-          </div>
+      {/* ── Input form ── */}
+      <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ display: 'block', marginBottom: 4, fontWeight: 600 }}>
+            Workflow Name
+          </label>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="e.g. Critical Bug Triage"
+            style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid #d1d5db' }}
+          />
         </div>
-
-        {error && <p style={s.error}>{error}</p>}
-
-        <div style={s.actions}>
-          <button style={s.btnPrimary} onClick={handlePlan} disabled={loading}>
-            {loading ? '⏳ Planning…' : '🧠 Plan Workflow'}
-          </button>
-
-          {rfNodes.length > 0 && (
-            <>
-              <select
-                style={s.select}
-                value={mode}
-                onChange={e => setMode(e.target.value)}
-              >
-                <option value="live">🚀 Live Run</option>
-                <option value="dry-run">🔵 Dry-Run (Simulation)</option>
-              </select>
-              <button style={s.btnSuccess} onClick={handleExecute} disabled={loading}>
-                {loading ? '⏳ Starting…' : '▶ Execute Workflow'}
-              </button>
-            </>
-          )}
+        <div style={{ flex: 2 }}>
+          <label style={{ display: 'block', marginBottom: 4, fontWeight: 600 }}>
+            Natural Language Description
+          </label>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            rows={3}
+            placeholder="When a critical bug is filed in Jira..."
+            style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid #d1d5db' }}
+          />
         </div>
       </div>
 
-      {/* ── ReactFlow DAG canvas ── */}
-      {rfNodes.length > 0 && (
-        <div style={s.card}>
-          <h2 style={s.h2}>Visual DAG</h2>
-          <p style={s.hint}>
-            Drag nodes to rearrange. Connect nodes to add dependencies.
-            Yellow nodes require a human approval before they execute.
-          </p>
-          <div style={{ height: 480, border: '1px solid #dcd9d5', borderRadius: 8 }}>
-            <ReactFlow
-              nodes={rfNodes}
-              edges={rfEdges}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
-              fitView
-            >
-              <MiniMap  nodeStrokeColor="#01696f" nodeColor="#cedcd8" />
-              <Controls />
-              <Background variant="dots" gap={16} color="#dcd9d5" />
-            </ReactFlow>
-          </div>
+      {/* ── Error message ── */}
+      {error && (
+        <div style={{ color: '#ef4444', marginBottom: 12, fontWeight: 500 }}>
+          ⚠ {error}
         </div>
       )}
 
-      {/* ── Learning Agent suggestions ── */}
+      {/* ── Plan button ── */}
+      <button
+        onClick={handlePlan}
+        disabled={loading}
+        style={{
+          background: '#1d4ed8', color: '#fff', border: 'none',
+          padding: '10px 24px', borderRadius: 8, cursor: 'pointer',
+          fontWeight: 600, fontSize: 15, marginBottom: 24,
+        }}
+      >
+        {loading ? '⏳ Planning...' : '🧠 Plan Workflow'}
+      </button>
+
+      {/* ── DAG visualization ── */}
+      {dag && dag.length > 0 && (
+        <div>
+          <h2>📊 Planned DAG  <span style={{ fontSize: 14, color: '#6b7280' }}>({dag.length} steps)</span></h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 }}>
+            {dag.map((node, idx) => (
+              <div key={node.id} style={{
+                border: '1px solid #e5e7eb', borderRadius: 10,
+                padding: '14px 18px', background: '#f9fafb',
+                display: 'flex', alignItems: 'flex-start', gap: 14,
+              }}>
+                {/* Step number */}
+                <div style={{
+                  width: 32, height: 32, borderRadius: '50%',
+                  background: '#1d4ed8', color: '#fff',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontWeight: 700, flexShrink: 0,
+                }}>
+                  {idx + 1}
+                </div>
+
+                <div style={{ flex: 1 }}>
+                  {/* Node ID + type badge */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <strong style={{ fontSize: 15 }}>{node.id}</strong>
+                    <span style={{
+                      background: typeBadgeColor(node.type),
+                      color: '#fff', fontSize: 11, padding: '2px 8px',
+                      borderRadius: 12, fontWeight: 600,
+                    }}>
+                      {node.type}
+                    </span>
+                    {node.approval_required && (
+                      <span style={{
+                        background: '#fef3c7', color: '#92400e',
+                        fontSize: 11, padding: '2px 8px',
+                        borderRadius: 12, fontWeight: 600,
+                        border: '1px solid #fcd34d',
+                      }}>
+                        🔐 Approval Gate
+                      </span>
+                    )}
+                  </div>
+
+                  {/* MCP server + tool */}
+                  <div style={{ color: '#374151', fontSize: 13, marginBottom: 4 }}>
+                    <span style={{ color: '#6b7280' }}>Server:</span> <code>{node.mcp_server}</code>
+                    {'  '}
+                    <span style={{ color: '#6b7280' }}>Tool:</span> <code>{node.tool}</code>
+                  </div>
+
+                  {/* Dependencies */}
+                  {node.depends_on?.length > 0 && (
+                    <div style={{ fontSize: 12, color: '#6b7280' }}>
+                      Depends on: {node.depends_on.map(d => (
+                        <code key={d} style={{ marginRight: 4 }}>{d}</code>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Execute button ── */}
+          <button
+            onClick={handleExecute}
+            disabled={loading}
+            style={{
+              background: '#059669', color: '#fff', border: 'none',
+              padding: '10px 28px', borderRadius: 8, cursor: 'pointer',
+              fontWeight: 600, fontSize: 15, marginBottom: 24,
+            }}
+          >
+            {loading ? '⏳ Starting...' : '🚀 Execute Workflow'}
+          </button>
+
+          {runId && (
+            <div style={{
+              background: '#d1fae5', border: '1px solid #6ee7b7',
+              borderRadius: 8, padding: '10px 16px', marginBottom: 16,
+            }}>
+              ✅ Run started — <strong>Run ID:</strong> <code>{runId}</code>
+              <br />
+              <span style={{ fontSize: 13, color: '#065f46' }}>
+                Go to <strong>Approvals</strong> tab to approve pending steps.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── AI Suggestions ── */}
       {suggestions.length > 0 && (
-        <div style={{ ...s.card, background: '#f0f8f7', border: '1px solid #cedcd8' }}>
-          <h3 style={{ ...s.h2, color: '#01696f' }}>💡 AI Suggestions</h3>
-          <ul style={{ paddingLeft: 20, margin: 0 }}>
-            {suggestions.map((sug, i) => (
-              <li key={i} style={{ marginBottom: 6, fontSize: 14, color: '#3b5c5e' }}>
-                {sug}
-              </li>
+        <div style={{
+          background: '#eff6ff', border: '1px solid #bfdbfe',
+          borderRadius: 10, padding: '16px 20px',
+        }}>
+          <h3 style={{ margin: '0 0 10px', color: '#1d4ed8' }}>💡 AI Suggestions</h3>
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {suggestions.map((s, i) => (
+              <li key={i} style={{ marginBottom: 6, color: '#374151' }}>{s}</li>
             ))}
           </ul>
         </div>
       )}
     </div>
   );
-}
-
-// ── Inline styles (swap for Tailwind or CSS modules in production) ─────────
-
-const s = {
-  h1:       { fontSize: 24, fontWeight: 700, marginBottom: 4, color: '#28251d' },
-  h2:       { fontSize: 17, fontWeight: 600, marginBottom: 8, color: '#28251d' },
-  subtitle: { fontSize: 14, color: '#7a7974', marginBottom: 20 },
-  card:     {
-    background: '#fff', borderRadius: 10, border: '1px solid #dcd9d5',
-    padding: 20, marginBottom: 20, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-  },
-  row:    { display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' },
-  label:  { display: 'block', fontSize: 13, fontWeight: 500, marginBottom: 4, color: '#28251d' },
-  input:  {
-    width: '100%', padding: '8px 12px', borderRadius: 6,
-    border: '1px solid #dcd9d5', fontSize: 14, color: '#28251d',
-    background: '#fafaf8', outline: 'none', boxSizing: 'border-box',
-  },
-  actions:   { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' },
-  btnPrimary: {
-    padding: '9px 20px', borderRadius: 6, border: 'none',
-    background: '#01696f', color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer',
-  },
-  btnSuccess: {
-    padding: '9px 20px', borderRadius: 6, border: 'none',
-    background: '#437a22', color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer',
-  },
-  select: {
-    padding: '8px 12px', borderRadius: 6,
-    border: '1px solid #dcd9d5', fontSize: 14, background: '#fafaf8', cursor: 'pointer',
-  },
-  hint:  { fontSize: 12, color: '#7a7974', marginBottom: 8 },
-  error: { color: '#a12c7b', fontSize: 13, marginTop: 8 },
 };
+
+export default WorkflowBuilder;
