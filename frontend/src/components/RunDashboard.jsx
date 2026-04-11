@@ -1,212 +1,398 @@
 // frontend/src/components/RunDashboard.jsx
-// Real-Time Run Dashboard:
-//   - Loads initial logs from Node backend (GET /api/logs/run/:runId).
-//   - Opens a WebSocket to the Python FastAPI orchestrator (/ws/runs/:runId).
-//   - Receives live events: { type: "log" | "node_status" | "run_completed", ... }
-//   - Renders per-step status badges and a scrollable live log area.
-//   - Polls /api/workflows/:workflowId/runs to show overall run metadata.
-
 import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
-const API_BASE    = import.meta.env.VITE_API_BASE     || 'http://localhost:4000';
-const ORCH_WS_BASE = import.meta.env.VITE_ORCH_WS_BASE || 'ws://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE  || 'http://localhost:4000';
+const ORCH_WS  = (import.meta.env.VITE_ORCH_BASE || 'http://localhost:8000')
+  .replace('http://', 'ws://')
+  .replace('https://', 'wss://');
 
-// Status colour map
-const STATUS_COLOR = {
-  pending:          { bg: '#f3f0ec', color: '#7a7974' },
-  running:          { bg: '#dbeafe', color: '#1e40af' },
-  waiting_approval: { bg: '#fff8e1', color: '#8a5b00' },
-  success:          { bg: '#d4dfcc', color: '#2e5c10' },
-  failed:           { bg: '#e0ced7', color: '#7d1e5e' },
-  skipped:          { bg: '#f3f0ec', color: '#bab9b4' },
+// ── Node status → visual style ────────────────────────────────────────────
+const NODE_STYLE = {
+  pending:          { bg: '#f3f4f6', border: '#d1d5db', color: '#6b7280',  icon: '⏳' },
+  running:          { bg: '#dbeafe', border: '#3b82f6', color: '#1d4ed8',  icon: '▶' },
+  success:          { bg: '#d1fae5', border: '#10b981', color: '#065f46',  icon: '✅' },
+  failed:           { bg: '#fee2e2', border: '#ef4444', color: '#991b1b',  icon: '❌' },
+  skipped:          { bg: '#f3f4f6', border: '#d1d5db', color: '#9ca3af',  icon: '⏭' },
+  waiting_approval: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e',  icon: '🔐' },
 };
 
-function StatusBadge({ status }) {
-  const style = STATUS_COLOR[status] || STATUS_COLOR.pending;
-  return (
-    <span style={{
-      display: 'inline-block', padding: '2px 10px',
-      borderRadius: 99, fontSize: 12, fontWeight: 600,
-      background: style.bg, color: style.color,
-    }}>
-      {status}
-    </span>
-  );
+// ── Parse log messages to extract node statuses ───────────────────────────
+function inferNodeStatuses(logs, dagNodes) {
+  const statuses = {};
+  dagNodes.forEach(n => { statuses[n.id] = 'pending'; });
+
+  for (const log of logs) {
+    const msg = log.message || '';
+    for (const node of dagNodes) {
+      const id = node.id;
+      if (msg.includes(`▶ ${id}`) || msg.includes(`▶ ${id} →`)) {
+        statuses[id] = 'running';
+      }
+      if (msg.includes(`✅ Node '${id}' completed`)) {
+        statuses[id] = 'success';
+      }
+      if (msg.includes(`❌ Node '${id}'`) || msg.includes(`Node '${id}' failed`)) {
+        statuses[id] = 'failed';
+      }
+      if (msg.includes(`⏭ Node '${id}' skipped`)) {
+        statuses[id] = 'skipped';
+      }
+      if (msg.includes(`⏸ Approval requested for '${id}'`)) {
+        statuses[id] = 'waiting_approval';
+      }
+      if (msg.includes(`👍 Node '${id}' approved`)) {
+        statuses[id] = 'running';
+      }
+    }
+  }
+  return statuses;
 }
 
-export default function RunDashboard() {
-  const { runId } = useParams();
+// ── Single DAG node card ──────────────────────────────────────────────────
+const DagNodeCard = ({ node, status }) => {
+  const s = NODE_STYLE[status] || NODE_STYLE.pending;
+  return (
+    <div style={{
+      border:       `2px solid ${s.border}`,
+      background:   s.bg,
+      borderRadius: 10,
+      padding:      '10px 14px',
+      minWidth:     160,
+      maxWidth:     200,
+      transition:   'all 0.3s ease',
+      boxShadow:    status === 'running' ? `0 0 12px ${s.border}` : 'none',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <span style={{ fontSize: 16 }}>{s.icon}</span>
+        <strong style={{ color: s.color, fontSize: 13 }}>{node.id}</strong>
+      </div>
+      <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>
+        <code>{node.mcp_server}</code>
+      </div>
+      <div style={{ fontSize: 11, color: '#374151' }}>
+        <code>{node.tool}</code>
+      </div>
+      {node.approval_required && (
+        <div style={{
+          marginTop: 6, fontSize: 10, background: '#fef3c7',
+          color: '#92400e', padding: '2px 6px', borderRadius: 8,
+          display: 'inline-block', border: '1px solid #fcd34d',
+        }}>
+          🔐 Approval Gate
+        </div>
+      )}
+      <div style={{
+        marginTop: 6, fontSize: 11, fontWeight: 600, color: s.color,
+        textTransform: 'capitalize',
+      }}>
+        {status.replace('_', ' ')}
+      </div>
+    </div>
+  );
+};
 
-  const [logs,      setLogs]      = useState([]);   // {level, message, timestamp}
-  const [steps,     setSteps]     = useState({});   // { nodeId: status }
-  const [runStatus, setRunStatus] = useState('running');
-  const [wsState,   setWsState]   = useState('connecting'); // 'connecting'|'open'|'closed'
-  const logEndRef = useRef(null);
+// ── Arrow between nodes ───────────────────────────────────────────────────
+const Arrow = () => (
+  <div style={{
+    display:    'flex',
+    alignItems: 'center',
+    color:      '#9ca3af',
+    fontSize:   20,
+    padding:    '0 4px',
+    userSelect: 'none',
+  }}>
+    →
+  </div>
+);
 
-  // ── Scroll log area to bottom on new entries ────────────────────────────
+// ── Main component ────────────────────────────────────────────────────────
+const RunDashboard = () => {
+  const { runId }          = useParams();
+  const navigate           = useNavigate();
+  const [logs, setLogs]    = useState([]);
+  const [status, setStatus]= useState('running');
+  const [wsState, setWsState] = useState('connecting');
+  const [dagNodes, setDagNodes] = useState([]);
+  const [nodeStatuses, setNodeStatuses] = useState({});
+  const [summary, setSummary] = useState({ success: 0, failed: 0, pending: 0 });
+  const wsRef      = useRef(null);
+  const logsEndRef = useRef(null);
+  const logsRef    = useRef([]);
+
+  // ── Load DAG from sessionStorage ──────────────────────────────────
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
-
-  // ── WebSocket: live events from FastAPI orchestrator ────────────────────
-  useEffect(() => {
-    // Load initial logs from Node backend
-    axios.get(`${API_BASE}/api/logs/run/${runId}`)
-      .then(res => setLogs(res.data))
-      .catch(console.error);
-
-    const ws = new WebSocket(`${ORCH_WS_BASE}/ws/runs/${runId}`);
-
-    ws.onopen = () => setWsState('open');
-
-    ws.onmessage = event => {
-      const msg = JSON.parse(event.data);
-
-      switch (msg.type) {
-        case 'log':
-          setLogs(prev => [
-            ...prev,
-            { level: msg.level, message: msg.message, timestamp: new Date().toISOString() },
-          ]);
-          break;
-
-        case 'node_status':
-          // { type: "node_status", node_id: "step2", status: "success" }
-          setSteps(prev => ({ ...prev, [msg.node_id]: msg.status }));
-          break;
-
-        case 'run_completed':
-          setRunStatus(msg.status);
-          ws.close();
-          break;
-
-        default:
-          break;
-      }
-    };
-
-    ws.onerror = err => {
-      console.error('WebSocket error:', err);
-      setWsState('closed');
-    };
-
-    ws.onclose = () => setWsState('closed');
-
-    return () => ws.close();
+    const saved = sessionStorage.getItem(`dag_${runId}`);
+    if (saved) {
+      const nodes = JSON.parse(saved);
+      setDagNodes(nodes);
+      const initial = {};
+      nodes.forEach(n => { initial[n.id] = 'pending'; });
+      setNodeStatuses(initial);
+    }
   }, [runId]);
 
-  // ── Render ───────────────────────────────────────────────────────────────
-  const logLevelStyle = { info: '#28251d', warning: '#8a5b00', error: '#a12c7b' };
+  // ── Update node statuses whenever logs change ──────────────────────
+  useEffect(() => {
+    if (dagNodes.length === 0) return;
+    const statuses = inferNodeStatuses(logsRef.current, dagNodes);
+    setNodeStatuses(statuses);
+
+    // Update summary counts
+    const vals = Object.values(statuses);
+    setSummary({
+      success: vals.filter(s => s === 'success').length,
+      failed:  vals.filter(s => s === 'failed').length,
+      pending: vals.filter(s => ['pending', 'running', 'waiting_approval'].includes(s)).length,
+    });
+  }, [logs, dagNodes]);
+
+  // ── WebSocket connection ───────────────────────────────────────────
+  useEffect(() => {
+    if (!runId) return;
+
+    // Load existing logs from Node backend
+    axios.get(`${API_BASE}/api/logs/run/${runId}`)
+      .then(res => {
+        const existing = res.data || [];
+        logsRef.current = existing;
+        setLogs(existing);
+      })
+      .catch(() => {});
+
+    const connect = () => {
+      const ws = new WebSocket(`${ORCH_WS}/ws/runs/${runId}`);
+      wsRef.current = ws;
+      ws.onopen  = () => setWsState('open');
+      ws.onerror = () => setWsState('error');
+      ws.onclose = () => {
+        setWsState('closed');
+        setTimeout(() => {
+          if (wsRef.current?.readyState !== WebSocket.OPEN) connect();
+        }, 3000);
+      };
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'log') {
+          const entry = {
+            level:     msg.level,
+            message:   msg.message,
+            timestamp: msg.timestamp || new Date().toISOString(),
+          };
+          logsRef.current = [...logsRef.current, entry];
+          setLogs(prev => [...prev, entry]);
+        }
+        if (msg.type === 'run_completed') {
+          setStatus(msg.status);
+          setWsState('done');
+        }
+        if (msg.type === 'approval_requested') setStatus('paused');
+        if (msg.type === 'approval_resolved')  setStatus('running');
+      };
+    };
+    connect();
+    return () => wsRef.current?.close();
+  }, [runId]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  // ── Build rows of nodes for DAG layout ────────────────────────────
+  // Simple linear layout: each node that has no deps = new row start
+  const buildRows = () => {
+    if (dagNodes.length === 0) return [];
+    const rows  = [];
+    const added = new Set();
+
+    const getLevel = (node, memo = {}) => {
+      if (memo[node.id] !== undefined) return memo[node.id];
+      if (!node.depends_on || node.depends_on.length === 0) {
+        memo[node.id] = 0;
+        return 0;
+      }
+      const depLevels = node.depends_on.map(dep => {
+        const depNode = dagNodes.find(n => n.id === dep);
+        return depNode ? getLevel(depNode, memo) : 0;
+      });
+      memo[node.id] = Math.max(...depLevels) + 1;
+      return memo[node.id];
+    };
+
+    const memo   = {};
+    const levels = {};
+    dagNodes.forEach(n => { levels[n.id] = getLevel(n, memo); });
+    const maxLevel = Math.max(...Object.values(levels));
+    for (let i = 0; i <= maxLevel; i++) {
+      rows.push(dagNodes.filter(n => levels[n.id] === i));
+    }
+    return rows;
+  };
+
+  const rows        = buildRows();
+  const statusColor = {
+    success: { bg: '#d1fae5', color: '#065f46' },
+    failed:  { bg: '#fee2e2', color: '#991b1b' },
+    paused:  { bg: '#fef3c7', color: '#92400e' },
+    running: { bg: '#dbeafe', color: '#1e40af' },
+  }[status] || { bg: '#f3f4f6', color: '#374151' };
+
+  const wsColor = { open: '#059669', error: '#ef4444', closed: '#f59e0b', connecting: '#6b7280', done: '#10b981' };
 
   return (
-    <div>
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: 24 }}>
+
       {/* ── Header ── */}
-      <div style={s.header}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
         <div>
-          <h1 style={s.h1}>Run Dashboard</h1>
-          <p style={s.subtitle}>Run ID: <code>{runId}</code></p>
+          <h1 style={{ margin: 0 }}>Run Dashboard</h1>
+          <p style={{ color: '#6b7280', margin: '4px 0 0', fontSize: 13 }}>
+            Run ID: <code>{runId}</code>
+          </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <StatusBadge status={runStatus} />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{
-            fontSize: 12, padding: '3px 10px', borderRadius: 99,
-            background: wsState === 'open' ? '#d4dfcc' : '#f3f0ec',
-            color: wsState === 'open' ? '#2e5c10' : '#7a7974',
+            background: statusColor.bg, color: statusColor.color,
+            padding: '4px 14px', borderRadius: 20, fontSize: 13, fontWeight: 600,
+          }}>
+            {status}
+          </span>
+          <span style={{
+            background: '#f3f4f6', border: `1px solid ${wsColor[wsState] || '#d1d5db'}`,
+            color: wsColor[wsState], padding: '4px 12px', borderRadius: 20, fontSize: 12,
           }}>
             WS: {wsState}
           </span>
-          <Link to="/" style={s.backLink}>← Back to Builder</Link>
+          <button
+            onClick={() => navigate('/approvals')}
+            style={{
+              background: '#fef3c7', border: '1px solid #fcd34d',
+              borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontWeight: 500,
+            }}
+          >
+            🔐 Approvals
+          </button>
+          <button
+            onClick={() => navigate('/')}
+            style={{
+              background: '#f3f4f6', border: '1px solid #d1d5db',
+              borderRadius: 8, padding: '6px 14px', cursor: 'pointer',
+            }}
+          >
+            ← Back to Builder
+          </button>
         </div>
       </div>
 
-      {/* ── Step Status Cards ── */}
-      {Object.keys(steps).length > 0 && (
-        <div style={s.card}>
-          <h2 style={s.h2}>Step Status</h2>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {Object.entries(steps).map(([nodeId, status]) => (
-              <div key={nodeId} style={{
-                padding: '8px 14px', borderRadius: 8,
-                border: '1px solid #dcd9d5', background: '#fafaf8', minWidth: 140,
-              }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{nodeId}</div>
-                <StatusBadge status={status} />
+      {/* ── Summary bar ── */}
+      <div style={{
+        display: 'flex', gap: 12, marginBottom: 24,
+      }}>
+        {[
+          { label: '✅ Completed', value: summary.success, bg: '#d1fae5', color: '#065f46' },
+          { label: '❌ Failed',    value: summary.failed,  bg: '#fee2e2', color: '#991b1b' },
+          { label: '⏳ Pending',   value: summary.pending, bg: '#f3f4f6', color: '#374151' },
+          { label: '📋 Total',     value: dagNodes.length, bg: '#dbeafe', color: '#1e40af' },
+        ].map(item => (
+          <div key={item.label} style={{
+            background: item.bg, borderRadius: 10,
+            padding: '12px 20px', flex: 1, textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: item.color }}>
+              {item.value}
+            </div>
+            <div style={{ fontSize: 12, color: item.color, marginTop: 2 }}>
+              {item.label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Live DAG View ── */}
+      {dagNodes.length > 0 && (
+        <div style={{
+          border: '1px solid #e5e7eb', borderRadius: 12,
+          padding: 20, marginBottom: 24, background: '#fafafa',
+        }}>
+          <h2 style={{ margin: '0 0 16px', fontSize: 16 }}>⚡ Live Execution DAG</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'flex-start' }}>
+            {rows.map((row, rowIdx) => (
+              <div key={rowIdx} style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                {rowIdx > 0 && (
+                  <div style={{
+                    width: '100%', display: 'flex',
+                    justifyContent: 'center',
+                    color: '#9ca3af', fontSize: 20, margin: '-8px 0',
+                  }}>
+                    ↓
+                  </div>
+                )}
+                {row.map((node, nodeIdx) => (
+                  <React.Fragment key={node.id}>
+                    {nodeIdx > 0 && <Arrow />}
+                    <DagNodeCard
+                      node={node}
+                      status={nodeStatuses[node.id] || 'pending'}
+                    />
+                  </React.Fragment>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {/* Legend */}
+          <div style={{ display: 'flex', gap: 16, marginTop: 16, flexWrap: 'wrap' }}>
+            {Object.entries(NODE_STYLE).map(([key, val]) => (
+              <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                <span>{val.icon}</span>
+                <span style={{ color: '#6b7280', textTransform: 'capitalize' }}>
+                  {key.replace('_', ' ')}
+                </span>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* ── Live Log Area ── */}
-      <div style={s.card}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <h2 style={{ ...s.h2, margin: 0 }}>Live Logs</h2>
-          <span style={{ fontSize: 12, color: '#7a7974' }}>{logs.length} entries</span>
+      {/* ── Live Logs ── */}
+      <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{
+          background: '#f9fafb', padding: '12px 16px',
+          borderBottom: '1px solid #e5e7eb',
+          display: 'flex', justifyContent: 'space-between',
+        }}>
+          <strong>Live Logs</strong>
+          <span style={{ color: '#6b7280', fontSize: 13 }}>{logs.length} entries</span>
         </div>
-        <div style={s.logBox}>
-          {logs.length === 0 && (
-            <span style={{ color: '#bab9b4', fontSize: 13 }}>Waiting for logs…</span>
-          )}
-          {logs.map((entry, i) => (
-            <div key={i} style={{ marginBottom: 3, fontSize: 13, lineHeight: 1.5 }}>
-              <span style={{ color: '#bab9b4', marginRight: 8, fontSize: 11 }}>
-                {entry.timestamp
-                  ? new Date(entry.timestamp).toLocaleTimeString()
-                  : ''}
-              </span>
-              <span style={{
-                fontWeight: 600, marginRight: 6,
-                color: logLevelStyle[entry.level] || '#28251d',
+        <div style={{
+          background: '#111827', padding: 16,
+          fontFamily: 'monospace', fontSize: 12,
+          minHeight: 250, maxHeight: 400, overflowY: 'auto',
+        }}>
+          {logs.length === 0 ? (
+            <span style={{ color: '#6b7280' }}>Waiting for logs...</span>
+          ) : (
+            logs.map((l, i) => (
+              <div key={i} style={{
+                color:        l.level === 'error'   ? '#f87171'
+                            : l.level === 'warning' ? '#fbbf24'
+                            : '#86efac',
+                marginBottom: 3,
               }}>
-                [{entry.level?.toUpperCase()}]
-              </span>
-              <span style={{ color: '#3b3a38' }}>{entry.message}</span>
-            </div>
-          ))}
-          <div ref={logEndRef} />
+                <span style={{ color: '#4b5563', marginRight: 8 }}>
+                  {l.timestamp?.slice(11, 19) || ''}
+                </span>
+                {l.message}
+              </div>
+            ))
+          )}
+          <div ref={logsEndRef} />
         </div>
       </div>
-
-      {/* ── Completion Banner ── */}
-      {runStatus !== 'running' && (
-        <div style={{
-          ...s.card,
-          background: runStatus === 'success' ? '#d4dfcc' : '#e0ced7',
-          border:     `1px solid ${runStatus === 'success' ? '#437a22' : '#a12c7b'}`,
-          textAlign: 'center',
-        }}>
-          <p style={{ fontWeight: 700, fontSize: 16,
-                      color: runStatus === 'success' ? '#2e5c10' : '#7d1e5e' }}>
-            {runStatus === 'success' ? '✅ Workflow completed successfully!' : '❌ Workflow run failed.'}
-          </p>
-          <Link to="/" style={{ color: '#01696f', fontSize: 14 }}>Start a new workflow →</Link>
-        </div>
-      )}
     </div>
   );
-}
-
-const s = {
-  h1:       { fontSize: 22, fontWeight: 700, color: '#28251d', marginBottom: 2 },
-  h2:       { fontSize: 16, fontWeight: 600, color: '#28251d', marginBottom: 8 },
-  subtitle: { fontSize: 13, color: '#7a7974' },
-  header:   {
-    display: 'flex', justifyContent: 'space-between',
-    alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 20,
-  },
-  card: {
-    background: '#fff', borderRadius: 10, border: '1px solid #dcd9d5',
-    padding: 20, marginBottom: 20, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-  },
-  logBox: {
-    background: '#171614', borderRadius: 8, padding: '12px 16px',
-    maxHeight: 420, overflowY: 'auto', fontFamily: 'monospace',
-    border: '1px solid #262523',
-  },
-  backLink: {
-    fontSize: 13, color: '#01696f', textDecoration: 'none',
-    padding: '5px 12px', borderRadius: 6, border: '1px solid #cedcd8',
-  },
 };
+
+export default RunDashboard;
