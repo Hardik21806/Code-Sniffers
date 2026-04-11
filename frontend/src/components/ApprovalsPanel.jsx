@@ -194,7 +194,9 @@ const ApprovalsPanel = () => {
             borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 500,
           }}
         >
-          ↺ Refresh
+
+           Refresh
+
         </button>
       </div>
 
