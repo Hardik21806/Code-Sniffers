@@ -1,0 +1,22 @@
+{
+  "jira-server": {
+    "transport": "http",
+    "baseUrl": "http://localhost:9001",
+    "credentials_env": "JIRA_MCP_TOKEN"
+  },
+  "slack-server": {
+    "transport": "http",
+    "baseUrl": "http://localhost:9002",
+    "credentials_env": "SLACK_MCP_TOKEN"
+  },
+  "sheets-server": {
+    "transport": "http",
+    "baseUrl": "http://localhost:9003",
+    "credentials_env": "SHEETS_MCP_TOKEN"
+  },
+  "github-server": {
+    "transport": "http",
+    "baseUrl": "http://localhost:9004",
+    "credentials_env": "GITHUB_MCP_TOKEN"
+  }
+}

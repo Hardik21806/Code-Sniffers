@@ -1,0 +1,15 @@
+{
+    "rules": [
+      {
+        "match_server": "github-server",
+        "match_tool": "createRelease",
+        "block_after_hour": 19,
+        "message": "GitHub releases are blocked after 19:00 IST."
+      },
+      {
+        "match_server": "slack-server",
+        "forbidden_param_keys": ["password", "token", "secret", "aadhaar"],
+        "message": "PII or secret fields must not be sent to Slack."
+      }
+    ]
+  }
