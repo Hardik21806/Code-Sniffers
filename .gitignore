@@ -16,4 +16,4 @@ dist/
 build/
 
 # JSON secrets (be careful)
-*.json
+orchestrator/mcp-jira-492913-af15d9ab13f9.json
