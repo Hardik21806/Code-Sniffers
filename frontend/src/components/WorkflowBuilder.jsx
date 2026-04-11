@@ -8,11 +8,13 @@
 
 import React, { useState } from 'react';
 import axios from 'axios';
+import { useNavigate } from 'react-router-dom';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:4000';
 const ORCH_BASE = import.meta.env.VITE_ORCH_BASE || 'http://localhost:8000';
 
 const WorkflowBuilder = () => {
+  const navigate = useNavigate();
   const [name, setName]               = useState('');
   const [description, setDescription] = useState('');
   const [dag, setDag]                 = useState(null);
@@ -69,32 +71,37 @@ const WorkflowBuilder = () => {
   };
 
   // ── Step 2: Execute workflow ────────────────────────────────────────
-  const handleExecute = async () => {
-    if (!dag || dag.length === 0) return;
-    setError(null);
-    setLoading(true);
+const handleExecute = async () => {
+  if (!dag || dag.length === 0) return;
+  setError(null);
+  setLoading(true);
 
-    try {
-      const newRunId = `run-${Date.now()}`;
+  try {
+    const newRunId = `run-${Date.now()}`;
 
-      // Always call orchestrator /execute directly with full DAG
-      const { data } = await axios.post(`${ORCH_BASE}/execute`, {
-        run_id:       newRunId,
-        workflow_id:  workflowId || 'demo-workflow',
-        mode:         'dry-run',
-        dry_run:      true,
-        dag:          dag,
-        input_payload: {},
-      });
+    // ── Save DAG to sessionStorage so RunDashboard can visualize it ──
+    sessionStorage.setItem(`dag_${newRunId}`, JSON.stringify(dag));
 
-      setRunId(newRunId);
-      alert(`✅ Run started! Run ID: ${newRunId}\n\nGo to the Approvals tab to approve pending steps.\nCheck terminal for live logs.`);
-    } catch (err) {
-      setError(`Execution failed: ${err.response?.data?.detail || err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
+    const { data } = await axios.post(`${ORCH_BASE}/execute`, {
+      run_id:        newRunId,
+      workflow_id:   workflowId || 'demo-workflow',
+      mode:          'dry-run',
+      dry_run:       true,
+      dag:           dag,
+      input_payload: {},
+    });
+
+    setRunId(newRunId);
+
+    // ── Redirect to Run Dashboard ──────────────────────────────────
+    navigate(`/runs/${newRunId}`);
+
+  } catch (err) {
+    setError(`Execution failed: ${err.response?.data?.detail || err.message}`);
+  } finally {
+    setLoading(false);
+  }
+};
 
   // ── Node type → color badge ─────────────────────────────────────────
   const typeBadgeColor = (type) => {
