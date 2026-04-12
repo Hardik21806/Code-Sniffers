@@ -130,10 +130,10 @@ const ApprovalsPanel = () => {
 
       {/* ── User identity bar ── */}
       <div style={{
-        background: '#f8fafc', border: '1px solid #e2e8f0',
+        background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.1)',
         borderRadius: 10, padding: '12px 20px',
         display: 'flex', alignItems: 'center',
-        gap: 12, marginBottom: 24,
+        gap: 12, marginBottom: 24, color: '#fff'
       }}>
         <span style={{ fontSize: 20 }}>👤</span>
         {userName ? (
@@ -142,9 +142,9 @@ const ApprovalsPanel = () => {
             <button
               onClick={() => { localStorage.removeItem('mcp_user'); setUserName(''); }}
               style={{
-                marginLeft: 12, background: 'none', border: '1px solid #d1d5db',
+                marginLeft: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.2)',
                 borderRadius: 6, padding: '2px 10px', cursor: 'pointer',
-                fontSize: 12, color: '#6b7280',
+                fontSize: 12, color: 'rgba(255,255,255,0.6)',
               }}
             >
               Change
@@ -152,7 +152,7 @@ const ApprovalsPanel = () => {
           </span>
         ) : (
           <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ color: '#6b7280', fontSize: 14 }}>
+            <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 14 }}>
               Set your name so approvals show who approved:
             </span>
             <input
@@ -161,14 +161,14 @@ const ApprovalsPanel = () => {
               onKeyDown={e => e.key === 'Enter' && saveUser()}
               placeholder="e.g. Hardik"
               style={{
-                padding: '4px 10px', borderRadius: 6,
-                border: '1px solid #d1d5db', fontSize: 14,
+                padding: '4px 10px', borderRadius: 6, color: '#fff', background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.2)', fontSize: 14,
               }}
             />
-            <button
+            <button className="magnetic-hover"
               onClick={saveUser}
               style={{
-                background: '#1d4ed8', color: '#fff', border: 'none',
+                background: 'linear-gradient(90deg,#00D4AA,#06b6d4)', color: '#050d1a', border: 'none',
                 padding: '4px 14px', borderRadius: 6,
                 cursor: 'pointer', fontWeight: 600,
               }}
@@ -182,21 +182,19 @@ const ApprovalsPanel = () => {
       {/* ── Approvals header ── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <div>
-          <h1 style={{ margin: 0 }}>🔐 Approvals</h1>
-          <p style={{ color: '#6b7280', margin: '4px 0 0' }}>
+          <h1 style={{ margin: 0, color: '#fff' }}>🔐 Approvals</h1>
+          <p style={{ color: 'rgba(255,255,255,0.6)', margin: '4px 0 0' }}>
             Review and approve workflow steps that require human confirmation.
           </p>
         </div>
-        <button
+        <button className="magnetic-hover"
           onClick={loadData}
           style={{
-            background: '#f3f4f6', border: '1px solid #d1d5db',
-            borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 500,
+            background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+            borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 500, color: '#fff'
           }}
         >
-
            Refresh
-
         </button>
       </div>
 
@@ -205,41 +203,42 @@ const ApprovalsPanel = () => {
       )}
 
       {/* ── Pending approvals ── */}
-      <h2 style={{ marginBottom: 12 }}>Pending</h2>
+      <h2 style={{ marginBottom: 12, color: '#fff' }}>Pending</h2>
       {loading && pending.length === 0 ? (
-        <p style={{ color: '#6b7280' }}>Loading...</p>
+        <p style={{ color: 'rgba(255,255,255,0.6)' }}>Loading...</p>
       ) : pending.length === 0 ? (
         <div style={{
-          border: '1px solid #e5e7eb', borderRadius: 12,
-          padding: '40px 24px', textAlign: 'center', background: '#fafafa',
+          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12,
+          padding: '40px 24px', textAlign: 'center', background: 'rgba(255,255,255,0.02)',
           marginBottom: 32,
         }}>
           <div style={{ fontSize: 40, marginBottom: 8 }}>✅</div>
-          <strong>All caught up!</strong>
-          <p style={{ color: '#6b7280', margin: '4px 0 0' }}>
+          <strong style={{color: '#fff'}}>All caught up!</strong>
+          <p style={{ color: 'rgba(255,255,255,0.6)', margin: '4px 0 0' }}>
             No pending approvals. Run a workflow to see approval gates here.
           </p>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 32 }}>
           {pending.map(a => (
-            <div key={a.id} style={{
-              border: '1px solid #fcd34d', borderRadius: 10,
-              padding: '16px 20px', background: '#fffbeb',
+            <div key={a.id} className="float-anim" style={{
+              border: '1px solid rgba(232, 197, 71, 0.2)', borderLeft: '4px solid #E8C547', borderRadius: 10,
+              padding: '16px 20px', background: 'rgba(255,255,255,0.05)',
+              boxShadow: '0 0 15px rgba(232, 197, 71, 0.2)', backdropFilter: 'blur(10px)',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             }}>
               <div>
-                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4, color: '#fff' }}>
                   🔐 {a.node_id}
-                  <span style={{
-                    marginLeft: 8, fontSize: 11, background: '#fef3c7',
-                    color: '#92400e', padding: '2px 8px', borderRadius: 12,
-                    border: '1px solid #fcd34d',
+                  <span className="pulse-glow-waiting" style={{
+                    marginLeft: 8, fontSize: 11, background: 'rgba(232, 197, 71, 0.15)',
+                    color: '#E8C547', padding: '2px 8px', borderRadius: 12,
+                    border: '1px solid rgba(232, 197, 71, 0.3)', display: 'inline-block'
                   }}>
                     pending
                   </span>
                 </div>
-                <div style={{ fontSize: 13, color: '#6b7280' }}>
+                <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)' }}>
                   Run: <code>{a.run_id}</code>
                 </div>
                 {a.mcp_server && (
@@ -253,22 +252,22 @@ const ApprovalsPanel = () => {
                   Approving as: <strong>{userName || 'anonymous'}</strong>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button
+                  <button className="magnetic-hover-teal"
                     onClick={() => decide(a, 'approved')}
                     style={{
-                      background: '#059669', color: '#fff', border: 'none',
+                      background: 'linear-gradient(90deg,#00D4AA,#06b6d4)', color: '#050d1a', border: 'none',
                       padding: '8px 20px', borderRadius: 8,
-                      cursor: 'pointer', fontWeight: 600,
+                      cursor: 'pointer', fontWeight: 700,
                     }}
                   >
                     ✅ Approve
                   </button>
-                  <button
+                  <button className="magnetic-hover-red"
                     onClick={() => decide(a, 'rejected')}
                     style={{
-                      background: '#ef4444', color: '#fff', border: 'none',
+                      background: 'rgba(239,68,68,0.15)', color: '#EF4444', border: '1px solid #EF4444',
                       padding: '8px 20px', borderRadius: 8,
-                      cursor: 'pointer', fontWeight: 600,
+                      cursor: 'pointer', fontWeight: 700,
                     }}
                   >
                     ❌ Reject
@@ -281,9 +280,9 @@ const ApprovalsPanel = () => {
       )}
 
       {/* ── Run History section ── */}
-      <h2 style={{ marginBottom: 12 }}>📜 Run History</h2>
+      <h2 style={{ marginBottom: 12, color: '#fff' }}>📜 Run History</h2>
       {Object.keys(history).length === 0 ? (
-        <p style={{ color: '#6b7280' }}>No run history yet. Execute a workflow first.</p>
+        <p style={{ color: 'rgba(255,255,255,0.6)' }}>No run history yet. Execute a workflow first.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {Object.entries(history).map(([runId, logs]) => {
@@ -297,9 +296,9 @@ const ApprovalsPanel = () => {
 
             return (
               <details key={runId} style={{
-                border: `1px solid ${sc.border}`,
-                borderRadius: 10, background: sc.bg,
-                padding: '12px 16px',
+                border: '1px solid rgba(255,255,255,0.1)', borderLeft: `4px solid ${sc.color}`,
+                borderRadius: 10, background: 'rgba(255,255,255,0.05)',
+                padding: '12px 16px', color: '#fff'
               }}>
                 <summary style={{ cursor: 'pointer', fontWeight: 600, display: 'flex', gap: 12, alignItems: 'center' }}>
                   <span style={{

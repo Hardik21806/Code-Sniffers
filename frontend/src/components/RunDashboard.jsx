@@ -1,398 +1,314 @@
-// frontend/src/components/RunDashboard.jsx
-import React, { useEffect, useRef, useState } from 'react';
+// frontend/src/pages/RunDashboard.jsx
+import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { supabase } from '../lib/supabaseClient';
+import VisualDagBuilder from '../components/VisualDagBuilder';
 
-const API_BASE = import.meta.env.VITE_API_BASE  || 'http://localhost:4000';
-const ORCH_WS  = (import.meta.env.VITE_ORCH_BASE || 'http://localhost:8000')
-  .replace('http://', 'ws://')
-  .replace('https://', 'wss://');
+const WS_BASE = import.meta.env.VITE_WS_BASE || 'ws://localhost:8000';
 
-// ── Node status → visual style ────────────────────────────────────────────
-const NODE_STYLE = {
-  pending:          { bg: '#f3f4f6', border: '#d1d5db', color: '#6b7280',  icon: '⏳' },
-  running:          { bg: '#dbeafe', border: '#3b82f6', color: '#1d4ed8',  icon: '▶' },
-  success:          { bg: '#d1fae5', border: '#10b981', color: '#065f46',  icon: '✅' },
-  failed:           { bg: '#fee2e2', border: '#ef4444', color: '#991b1b',  icon: '❌' },
-  skipped:          { bg: '#f3f4f6', border: '#d1d5db', color: '#9ca3af',  icon: '⏭' },
-  waiting_approval: { bg: '#fef3c7', border: '#f59e0b', color: '#92400e',  icon: '🔐' },
+const STATUS_COLOR = {
+  success: '#00D4AA',
+  failed:  '#EF4444',
+  running: '#6366f1',
+  paused:  '#E8C547',
+  queued:  '#9ca3af',
 };
 
-// ── Parse log messages to extract node statuses ───────────────────────────
-function inferNodeStatuses(logs, dagNodes) {
-  const statuses = {};
-  dagNodes.forEach(n => { statuses[n.id] = 'pending'; });
-
-  for (const log of logs) {
-    const msg = log.message || '';
-    for (const node of dagNodes) {
-      const id = node.id;
-      if (msg.includes(`▶ ${id}`) || msg.includes(`▶ ${id} →`)) {
-        statuses[id] = 'running';
-      }
-      if (msg.includes(`✅ Node '${id}' completed`)) {
-        statuses[id] = 'success';
-      }
-      if (msg.includes(`❌ Node '${id}'`) || msg.includes(`Node '${id}' failed`)) {
-        statuses[id] = 'failed';
-      }
-      if (msg.includes(`⏭ Node '${id}' skipped`)) {
-        statuses[id] = 'skipped';
-      }
-      if (msg.includes(`⏸ Approval requested for '${id}'`)) {
-        statuses[id] = 'waiting_approval';
-      }
-      if (msg.includes(`👍 Node '${id}' approved`)) {
-        statuses[id] = 'running';
-      }
-    }
-  }
-  return statuses;
-}
-
-// ── Single DAG node card ──────────────────────────────────────────────────
-const DagNodeCard = ({ node, status }) => {
-  const s = NODE_STYLE[status] || NODE_STYLE.pending;
-  return (
-    <div style={{
-      border:       `2px solid ${s.border}`,
-      background:   s.bg,
-      borderRadius: 10,
-      padding:      '10px 14px',
-      minWidth:     160,
-      maxWidth:     200,
-      transition:   'all 0.3s ease',
-      boxShadow:    status === 'running' ? `0 0 12px ${s.border}` : 'none',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-        <span style={{ fontSize: 16 }}>{s.icon}</span>
-        <strong style={{ color: s.color, fontSize: 13 }}>{node.id}</strong>
-      </div>
-      <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>
-        <code>{node.mcp_server}</code>
-      </div>
-      <div style={{ fontSize: 11, color: '#374151' }}>
-        <code>{node.tool}</code>
-      </div>
-      {node.approval_required && (
-        <div style={{
-          marginTop: 6, fontSize: 10, background: '#fef3c7',
-          color: '#92400e', padding: '2px 6px', borderRadius: 8,
-          display: 'inline-block', border: '1px solid #fcd34d',
-        }}>
-          🔐 Approval Gate
-        </div>
-      )}
-      <div style={{
-        marginTop: 6, fontSize: 11, fontWeight: 600, color: s.color,
-        textTransform: 'capitalize',
-      }}>
-        {status.replace('_', ' ')}
-      </div>
-    </div>
-  );
+const LOG_COLOR = {
+  error:   '#EF4444',
+  warning: '#F59E0B',
+  info:    '#00D4AA',
 };
 
-// ── Arrow between nodes ───────────────────────────────────────────────────
-const Arrow = () => (
-  <div style={{
-    display:    'flex',
-    alignItems: 'center',
-    color:      '#9ca3af',
-    fontSize:   20,
-    padding:    '0 4px',
-    userSelect: 'none',
-  }}>
-    →
-  </div>
-);
+export default function RunDashboard() {
+  const { runId }   = useParams();
+  const navigate    = useNavigate();
 
-// ── Main component ────────────────────────────────────────────────────────
-const RunDashboard = () => {
-  const { runId }          = useParams();
-  const navigate           = useNavigate();
-  const [logs, setLogs]    = useState([]);
-  const [status, setStatus]= useState('running');
-  const [wsState, setWsState] = useState('connecting');
-  const [dagNodes, setDagNodes] = useState([]);
+  const [run,          setRun]          = useState(null);
+  const [dag,          setDag]          = useState([]);
+  const [logs,         setLogs]         = useState([]);
   const [nodeStatuses, setNodeStatuses] = useState({});
-  const [summary, setSummary] = useState({ success: 0, failed: 0, pending: 0 });
-  const wsRef      = useRef(null);
+  const [connected,    setConnected]    = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+
   const logsEndRef = useRef(null);
-  const logsRef    = useRef([]);
+  const wsRef      = useRef(null);
 
-  // ── Load DAG from sessionStorage ──────────────────────────────────
-  useEffect(() => {
-    const saved = sessionStorage.getItem(`dag_${runId}`);
-    if (saved) {
-      const nodes = JSON.parse(saved);
-      setDagNodes(nodes);
-      const initial = {};
-      nodes.forEach(n => { initial[n.id] = 'pending'; });
-      setNodeStatuses(initial);
-    }
-  }, [runId]);
-
-  // ── Update node statuses whenever logs change ──────────────────────
-  useEffect(() => {
-    if (dagNodes.length === 0) return;
-    const statuses = inferNodeStatuses(logsRef.current, dagNodes);
-    setNodeStatuses(statuses);
-
-    // Update summary counts
-    const vals = Object.values(statuses);
-    setSummary({
-      success: vals.filter(s => s === 'success').length,
-      failed:  vals.filter(s => s === 'failed').length,
-      pending: vals.filter(s => ['pending', 'running', 'waiting_approval'].includes(s)).length,
-    });
-  }, [logs, dagNodes]);
-
-  // ── WebSocket connection ───────────────────────────────────────────
+  // ── Load run + workflow DAG from Supabase ──────────────────
   useEffect(() => {
     if (!runId) return;
 
-    // Load existing logs from Node backend
-    axios.get(`${API_BASE}/api/logs/run/${runId}`)
-      .then(res => {
-        const existing = res.data || [];
-        logsRef.current = existing;
-        setLogs(existing);
-      })
-      .catch(() => {});
+    const loadRun = async () => {
+      try {
+        const { data: runData } = await supabase
+          .from('workflow_runs')
+          .select('*')
+          .eq('id', runId)
+          .single();
 
-    const connect = () => {
-      const ws = new WebSocket(`${ORCH_WS}/ws/runs/${runId}`);
-      wsRef.current = ws;
-      ws.onopen  = () => setWsState('open');
-      ws.onerror = () => setWsState('error');
-      ws.onclose = () => {
-        setWsState('closed');
-        setTimeout(() => {
-          if (wsRef.current?.readyState !== WebSocket.OPEN) connect();
-        }, 3000);
-      };
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'log') {
-          const entry = {
-            level:     msg.level,
-            message:   msg.message,
-            timestamp: msg.timestamp || new Date().toISOString(),
-          };
-          logsRef.current = [...logsRef.current, entry];
-          setLogs(prev => [...prev, entry]);
+        if (!runData) return;
+        setRun(runData);
+
+        // Load DAG from the workflow
+        if (runData.workflow_id) {
+          const { data: wfData } = await supabase
+            .from('workflows')
+            .select('dag_json')
+            .eq('id', runData.workflow_id)
+            .single();
+
+          if (wfData?.dag_json) {
+            setDag(wfData.dag_json);
+          }
         }
-        if (msg.type === 'run_completed') {
-          setStatus(msg.status);
-          setWsState('done');
+
+        // Load existing step statuses
+        const { data: steps } = await supabase
+          .from('workflow_run_steps')
+          .select('node_id, status')
+          .eq('run_id', runId);
+
+        if (steps) {
+          const statusMap = {};
+          steps.forEach(s => { statusMap[s.node_id] = s.status; });
+          setNodeStatuses(statusMap);
         }
-        if (msg.type === 'approval_requested') setStatus('paused');
-        if (msg.type === 'approval_resolved')  setStatus('running');
-      };
+
+        // Load pending approvals
+        const { data: approvals } = await supabase
+          .from('approvals')
+          .select('*')
+          .eq('run_id', runId)
+          .eq('status', 'pending');
+        setPendingApprovals(approvals || []);
+
+      } catch (e) {
+        console.error('[RunDashboard] load error:', e);
+      }
     };
-    connect();
-    return () => wsRef.current?.close();
+
+    loadRun();
   }, [runId]);
 
-  // Auto-scroll logs
+  // ── WebSocket: real-time log + node color updates ──────────
+  useEffect(() => {
+    if (!runId) return;
+
+    const ws = new WebSocket(`${WS_BASE}/ws/runs/${runId}`);
+    wsRef.current = ws;
+
+    ws.onopen  = () => setConnected(true);
+    ws.onclose = () => setConnected(false);
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+
+        // Live log streaming
+        if (msg.type === 'log') {
+          setLogs(prev => [...prev, msg]);
+        }
+
+        // Node color changes — Visual DAG Builder
+        if (msg.type === 'step_started') {
+          setNodeStatuses(p => ({ ...p, [msg.node_id]: 'running' }));
+        }
+        if (msg.type === 'step_completed') {
+          setNodeStatuses(p => ({ ...p, [msg.node_id]: 'success' }));
+        }
+        if (msg.type === 'step_failed') {
+          setNodeStatuses(p => ({ ...p, [msg.node_id]: 'failed' }));
+        }
+        if (msg.type === 'step_skipped') {
+          setNodeStatuses(p => ({ ...p, [msg.node_id]: 'skipped' }));
+        }
+        if (msg.type === 'approval_requested') {
+          setNodeStatuses(p => ({ ...p, [msg.node_id]: 'paused' }));
+          setPendingApprovals(p => [...p, { node_id: msg.node_id, run_id: runId, status: 'pending' }]);
+        }
+        if (msg.type === 'approval_resolved') {
+          setNodeStatuses(p => ({
+            ...p,
+            [msg.node_id]: msg.decision === 'approved' ? 'running' : 'failed',
+          }));
+          setPendingApprovals(p => p.filter(a => a.node_id !== msg.node_id));
+        }
+
+        // Run status update
+        if (msg.type === 'run_completed') {
+          setRun(prev => prev ? { ...prev, status: msg.status } : prev);
+        }
+        if (msg.type === 'run_started') {
+          setRun(prev => prev ? { ...prev, status: 'running' } : prev);
+        }
+
+      } catch (err) {
+        console.error('[ws] parse error:', err);
+      }
+    };
+
+    return () => ws.close();
+  }, [runId]);
+
+  // ── Auto-scroll logs ───────────────────────────────────────
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  // ── Build rows of nodes for DAG layout ────────────────────────────
-  // Simple linear layout: each node that has no deps = new row start
-  const buildRows = () => {
-    if (dagNodes.length === 0) return [];
-    const rows  = [];
-    const added = new Set();
+  // ── Approval actions ───────────────────────────────────────
+  const handleApproval = async (nodeId, decision) => {
+    try {
+      await supabase
+        .from('approvals')
+        .update({ status: decision })
+        .eq('run_id', runId)
+        .eq('node_id', nodeId);
 
-    const getLevel = (node, memo = {}) => {
-      if (memo[node.id] !== undefined) return memo[node.id];
-      if (!node.depends_on || node.depends_on.length === 0) {
-        memo[node.id] = 0;
-        return 0;
-      }
-      const depLevels = node.depends_on.map(dep => {
-        const depNode = dagNodes.find(n => n.id === dep);
-        return depNode ? getLevel(depNode, memo) : 0;
+      // Tell orchestrator
+      await fetch(`${import.meta.env.VITE_ORCH_BASE || 'http://localhost:8000'}/approval-callback`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ run_id: runId, node_id: nodeId, decision }),
       });
-      memo[node.id] = Math.max(...depLevels) + 1;
-      return memo[node.id];
-    };
 
-    const memo   = {};
-    const levels = {};
-    dagNodes.forEach(n => { levels[n.id] = getLevel(n, memo); });
-    const maxLevel = Math.max(...Object.values(levels));
-    for (let i = 0; i <= maxLevel; i++) {
-      rows.push(dagNodes.filter(n => levels[n.id] === i));
+      setPendingApprovals(p => p.filter(a => a.node_id !== nodeId));
+    } catch (e) {
+      console.error('[approval]', e);
     }
-    return rows;
   };
 
-  const rows        = buildRows();
-  const statusColor = {
-    success: { bg: '#d1fae5', color: '#065f46' },
-    failed:  { bg: '#fee2e2', color: '#991b1b' },
-    paused:  { bg: '#fef3c7', color: '#92400e' },
-    running: { bg: '#dbeafe', color: '#1e40af' },
-  }[status] || { bg: '#f3f4f6', color: '#374151' };
-
-  const wsColor = { open: '#059669', error: '#ef4444', closed: '#f59e0b', connecting: '#6b7280', done: '#10b981' };
+  const runStatusColor = STATUS_COLOR[run?.status] || '#9ca3af';
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto', padding: 24 }}>
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 16px' }}>
 
       {/* ── Header ── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Run Dashboard</h1>
-          <p style={{ color: '#6b7280', margin: '4px 0 0', fontSize: 13 }}>
-            Run ID: <code>{runId}</code>
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{
-            background: statusColor.bg, color: statusColor.color,
-            padding: '4px 14px', borderRadius: 20, fontSize: 13, fontWeight: 600,
-          }}>
-            {status}
-          </span>
-          <span style={{
-            background: '#f3f4f6', border: `1px solid ${wsColor[wsState] || '#d1d5db'}`,
-            color: wsColor[wsState], padding: '4px 12px', borderRadius: 20, fontSize: 12,
-          }}>
-            WS: {wsState}
-          </span>
-          <button
-            onClick={() => navigate('/approvals')}
-            style={{
-              background: '#fef3c7', border: '1px solid #fcd34d',
-              borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontWeight: 500,
-            }}
-          >
-            🔐 Approvals
-          </button>
-          <button
-            onClick={() => navigate('/')}
-            style={{
-              background: '#f3f4f6', border: '1px solid #d1d5db',
-              borderRadius: 8, padding: '6px 14px', cursor: 'pointer',
-            }}
-          >
-            ← Back to Builder
-          </button>
-        </div>
-      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+        <button
+          onClick={() => navigate(-1)}
+          style={{
+            background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+            borderRadius: 8, padding: '8px 14px', color: '#fff',
+            cursor: 'pointer', fontSize: 13,
+          }}
+        >← Back</button>
 
-      {/* ── Summary bar ── */}
-      <div style={{
-        display: 'flex', gap: 12, marginBottom: 24,
-      }}>
-        {[
-          { label: '✅ Completed', value: summary.success, bg: '#d1fae5', color: '#065f46' },
-          { label: '❌ Failed',    value: summary.failed,  bg: '#fee2e2', color: '#991b1b' },
-          { label: '⏳ Pending',   value: summary.pending, bg: '#f3f4f6', color: '#374151' },
-          { label: '📋 Total',     value: dagNodes.length, bg: '#dbeafe', color: '#1e40af' },
-        ].map(item => (
-          <div key={item.label} style={{
-            background: item.bg, borderRadius: 10,
-            padding: '12px 20px', flex: 1, textAlign: 'center',
-          }}>
-            <div style={{ fontSize: 24, fontWeight: 700, color: item.color }}>
-              {item.value}
-            </div>
-            <div style={{ fontSize: 12, color: item.color, marginTop: 2 }}>
-              {item.label}
-            </div>
+        <div style={{ flex: 1 }}>
+          <h1 style={{ color: '#fff', fontWeight: 800, fontSize: 22, margin: 0 }}>
+            ⚡ Run Dashboard
+          </h1>
+          <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, marginTop: 3, fontFamily: 'monospace' }}>
+            {runId}
           </div>
-        ))}
+        </div>
+
+        {/* Run status badge */}
+        {run && (
+          <div style={{
+            background: `${runStatusColor}18`,
+            border:     `1px solid ${runStatusColor}`,
+            borderRadius: 20, padding: '6px 16px',
+            color: runStatusColor, fontWeight: 700, fontSize: 13,
+          }}>
+            {run.status === 'running' && <span style={{ marginRight: 6 }}>⚡</span>}
+            {run.status?.toUpperCase()}
+          </div>
+        )}
+
+        {/* WebSocket indicator */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>
+          <span className={connected ? "status-dot-green" : ""} style={{
+            width: 8, height: 8, borderRadius: '50%',
+            background: connected ? '#00D4AA' : '#EF4444',
+            display: 'inline-block',
+            boxShadow: connected ? '0 0 6px #00D4AA' : 'none',
+          }} />
+          {connected ? 'Live' : 'Disconnected'}
+        </div>
       </div>
 
-      {/* ── Live DAG View ── */}
-      {dagNodes.length > 0 && (
+      {/* ── Pending Approvals Banner ── */}
+      {pendingApprovals.length > 0 && (
         <div style={{
-          border: '1px solid #e5e7eb', borderRadius: 12,
-          padding: 20, marginBottom: 24, background: '#fafafa',
+          background: 'rgba(232,197,71,0.1)',
+          border: '1px solid rgba(232,197,71,0.4)',
+          borderRadius: 12, padding: '14px 18px', marginBottom: 20,
         }}>
-          <h2 style={{ margin: '0 0 16px', fontSize: 16 }}>⚡ Live Execution DAG</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'flex-start' }}>
-            {rows.map((row, rowIdx) => (
-              <div key={rowIdx} style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                {rowIdx > 0 && (
-                  <div style={{
-                    width: '100%', display: 'flex',
-                    justifyContent: 'center',
-                    color: '#9ca3af', fontSize: 20, margin: '-8px 0',
-                  }}>
-                    ↓
-                  </div>
-                )}
-                {row.map((node, nodeIdx) => (
-                  <React.Fragment key={node.id}>
-                    {nodeIdx > 0 && <Arrow />}
-                    <DagNodeCard
-                      node={node}
-                      status={nodeStatuses[node.id] || 'pending'}
-                    />
-                  </React.Fragment>
-                ))}
-              </div>
-            ))}
+          <div style={{ color: '#E8C547', fontWeight: 700, fontSize: 14, marginBottom: 10 }}>
+            🔐 Approval Required ({pendingApprovals.length})
           </div>
-
-          {/* Legend */}
-          <div style={{ display: 'flex', gap: 16, marginTop: 16, flexWrap: 'wrap' }}>
-            {Object.entries(NODE_STYLE).map(([key, val]) => (
-              <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
-                <span>{val.icon}</span>
-                <span style={{ color: '#6b7280', textTransform: 'capitalize' }}>
-                  {key.replace('_', ' ')}
-                </span>
+          {pendingApprovals.map(a => (
+            <div key={a.node_id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ color: '#fff', fontSize: 14 }}>
+                Node: <code style={{ color: '#E8C547' }}>{a.node_id}</code>
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="magnetic-hover-teal"
+                  onClick={() => handleApproval(a.node_id, 'approved')}
+                  style={{
+                    background: 'linear-gradient(90deg,#00D4AA,#06b6d4)',
+                    border: 'none', borderRadius: 8,
+                    padding: '7px 18px', cursor: 'pointer',
+                    color: '#050d1a', fontWeight: 700, fontSize: 13,
+                  }}
+                >✅ Approve</button>
+                <button className="magnetic-hover-red"
+                  onClick={() => handleApproval(a.node_id, 'rejected')}
+                  style={{
+                    background: 'rgba(239,68,68,0.15)',
+                    border: '1px solid #EF4444', borderRadius: 8,
+                    padding: '7px 18px', cursor: 'pointer',
+                    color: '#EF4444', fontWeight: 700, fontSize: 13,
+                  }}
+                >❌ Reject</button>
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* ── Live Logs ── */}
-      <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, overflow: 'hidden' }}>
-        <div style={{
-          background: '#f9fafb', padding: '12px 16px',
-          borderBottom: '1px solid #e5e7eb',
-          display: 'flex', justifyContent: 'space-between',
-        }}>
-          <strong>Live Logs</strong>
-          <span style={{ color: '#6b7280', fontSize: 13 }}>{logs.length} entries</span>
+      {/* ── Visual DAG Builder — nodes change color in real time ── */}
+      <VisualDagBuilder dag={dag} nodeStatuses={nodeStatuses} />
+
+      {/* ── Live Log Stream ── */}
+      <div style={{ marginTop: 24 }}>
+        <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, fontWeight: 700, marginBottom: 10 }}>
+          📋 LIVE LOGS
+          <span style={{ marginLeft: 8, color: 'rgba(255,255,255,0.25)', fontWeight: 400 }}>
+            {logs.length} events
+          </span>
         </div>
         <div style={{
-          background: '#111827', padding: 16,
-          fontFamily: 'monospace', fontSize: 12,
-          minHeight: 250, maxHeight: 400, overflowY: 'auto',
+          background: '#0d1117', border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 12, padding: 16,
+          height: 320, overflowY: 'auto',
+          fontFamily: '"JetBrains Mono", monospace', fontSize: 12,
         }}>
           {logs.length === 0 ? (
-            <span style={{ color: '#6b7280' }}>Waiting for logs...</span>
+            <div style={{ color: 'rgba(255,255,255,0.2)', textAlign: 'center', paddingTop: 40 }}>
+              {connected ? 'Waiting for events...' : 'Connecting...'}
+            </div>
           ) : (
-            logs.map((l, i) => (
-              <div key={i} style={{
-                color:        l.level === 'error'   ? '#f87171'
-                            : l.level === 'warning' ? '#fbbf24'
-                            : '#86efac',
-                marginBottom: 3,
-              }}>
-                <span style={{ color: '#4b5563', marginRight: 8 }}>
-                  {l.timestamp?.slice(11, 19) || ''}
+            logs.map((log, i) => (
+              <div key={i} style={{ marginBottom: 5, display: 'flex', gap: 10 }}>
+                <span style={{ color: 'rgba(255,255,255,0.2)', flexShrink: 0 }}>
+                  {log.timestamp ? new Date(log.timestamp).toLocaleTimeString('en-IN') : ''}
                 </span>
-                {l.message}
+                <span style={{
+                  color: LOG_COLOR[log.level] || 'rgba(255,255,255,0.7)',
+                  flexShrink: 0, fontSize: 11, fontWeight: 700,
+                  textTransform: 'uppercase', minWidth: 50,
+                }}>
+                  [{log.level || 'info'}]
+                </span>
+                <span style={{ color: 'rgba(255,255,255,0.75)' }}>{log.message}</span>
               </div>
             ))
           )}
           <div ref={logsEndRef} />
         </div>
       </div>
+
     </div>
   );
-};
-
-export default RunDashboard;
+}
